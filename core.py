@@ -7,8 +7,8 @@ from urllib.parse import quote
 from pyrogram.enums import ChatMemberStatus
 from pyrogram.errors import FloodWait, MessageNotModified, UserNotParticipant
 from pyrogram.types import CallbackQuery
-from pyrogram.types import InlineKeyboardButton as B
-from pyrogram.types import InlineKeyboardMarkup as KB
+
+from ui import B, KB
 
 import config
 from client import app
@@ -17,6 +17,12 @@ from db import get_product, get_settings, jobs, jr, now, products, refers, users
 log = logging.getLogger("core")
 BOT = {"username": ""}
 MEDALS = ["🥇", "🥈", "🥉"]
+LINE = "━━━━━━━━━━━━━━"
+DEFAULT_WELCOME = (
+    "👋 <b>Welcome, {name}!</b>\n" + LINE + "\n"
+    "Free product paane ke liye kisi product ka link kholo, channels join karo aur dosto ko refer karo.\n"
+    "Target poora hote hi content <b>automatically</b> mil jayega ⚡"
+)
 
 
 # ---------------- helpers ----------------
@@ -134,7 +140,7 @@ async def try_deliver(uid, pid, fsub_ok=False, announce=False):
         return False
     if await count_refs(pid, uid) < p["refers_required"]:
         return False
-    if not fsub_ok and await missing_fsubs(uid, p):
+    if not fsub_ok and not rec.get("fsub_done") and await missing_fsubs(uid, p):
         return False
 
     # atomic claim -> only one delivery ever
@@ -146,7 +152,7 @@ async def try_deliver(uid, pid, fsub_ok=False, announce=False):
         return False
     try:
         if announce:
-            await app.send_message(uid, f"🎉 Refer complete! <b>{esc(p['name'])}</b> unlock ho gaya 👇")
+            await app.send_message(uid, f"🎉 <b>Target complete!</b>\n{LINE}\n<b>{esc(p['name'])}</b> automatically unlock ho gaya ⚡👇")
         await send_content(uid, p)
         return True
     except Exception as e:
@@ -174,30 +180,35 @@ async def on_fsub_done(uid, pid):
     n = await count_refs(pid, ref)
     if await try_deliver(ref, pid, announce=True):
         return
-    msg = f"🎉 Ek refer complete!\n<b>{esc(p['name'])}</b>: {bar(n, need)}"
+    msg = f"🎉 <b>Naya refer complete!</b>\n{LINE}\n📦 {esc(p['name'])}\n👥 {bar(n, need)}"
     if n >= need:
-        msg += "\n\nTarget poora! Content ke liye product ke channels join karke link dobara kholo."
+        msg += "\n\n⚠️ Target poora ho gaya. Content ke liye product ke channels join karke apna link dobara kholo."
+    else:
+        msg += f"\n\nAur <b>{need - n}</b> refer baaki hain 💪"
     try:
         await app.send_message(ref, msg)
     except Exception:
         pass
 
 
-async def advance(uid, pid):
-    """Returns (state, product, extra). state: off | fsub | delivered | already | refer"""
+async def advance(uid, pid, fast=False):
+    """Returns (state, product, extra). state: off | fsub | delivered | already | refer
+    fast=True: skip the fsub API check for users who already passed it (used by Refresh)."""
     p = await get_product(pid)
     if not p or p.get("paused"):
         return "off", p, None
-    miss = await missing_fsubs(uid, p)
-    if miss:
-        return "fsub", p, miss
-    await on_fsub_done(uid, pid)
-    if await try_deliver(uid, pid, fsub_ok=True):
-        return "delivered", p, None
     u = await users.find_one({"_id": uid}, {f"products.p{pid}": 1})
     rec = ((u or {}).get("products") or {}).get(f"p{pid}") or {}
     if rec.get("delivered"):
         return "already", p, None
+    skip = fast and rec.get("fsub_done")
+    if not skip:
+        miss = await missing_fsubs(uid, p)
+        if miss:
+            return "fsub", p, miss
+        await on_fsub_done(uid, pid)
+    if await try_deliver(uid, pid, fsub_ok=True):
+        return "delivered", p, None
     return "refer", p, await count_refs(pid, uid)
 
 
@@ -219,12 +230,16 @@ def fsub_kb(pid, miss):
 def refer_view(p, uid, n):
     pid, need = p["_id"], p["refers_required"]
     link = rlink(pid, uid)
+    left = max(need - n, 0)
     text = (
-        f"🎁 <b>{esc(p['name'])}</b>\n\n"
-        f"👥 Refer: {bar(n, need)}\n\n"
-        f"{need} dost ko apna link bhejo. Wo product ke channels join karte hi refer count hoga, "
-        f"aur target poora hote hi content apne aap mil jayega.\n\n"
-        f"🔗 <code>{link}</code>"
+        f"🎁 <b>{esc(p['name'])}</b>\n{LINE}\n"
+        f"👥 <b>Progress</b>\n{bar(n, need)}\n"
+        f"<i>{left} refer baaki</i>\n\n"
+        f"📌 <b>Kaise kaam karta hai</b>\n"
+        f"1️⃣ Neeche ka link dost ko bhejo\n"
+        f"2️⃣ Dost product ke channels join kare\n"
+        f"3️⃣ {need} refer poore hote hi content <b>auto</b> mil jayega ⚡\n\n"
+        f"🔗 <b>Aapka link</b>\n<code>{link}</code>"
     )
     share = f"https://t.me/share/url?url={quote(link)}&text={quote('🎁 Free ' + p['name'] + ' paao! Is link se start karo 👇')}"
     kb = KB([
@@ -234,24 +249,25 @@ def refer_view(p, uid, n):
     return text, kb
 
 
-async def flow(target, uid, pid):
-    st, p, x = await advance(uid, pid)
+async def flow(target, uid, pid, fast=False):
+    st, p, x = await advance(uid, pid, fast)
     if st == "off":
         await show(target, "⏸ Ye product abhi available nahi hai.")
     elif st == "fsub":
         txt = (
-            f"🔒 <b>{esc(p['name'])}</b>\n\n"
-            f"Content paane ke liye pehle neeche ke <b>{len(x)}</b> channel join karo, fir ✅ Joined dabao.\n"
-            f"📨 = Request mode (sirf join request bhejna kaafi hai)."
+            f"🔒 <b>{esc(p['name'])}</b>\n{LINE}\n"
+            f"Content unlock karne ke liye pehle ye <b>{len(x)}</b> channel join karo, phir ✅ Joined dabao.\n\n"
+            f"📢 Normal — channel join karo\n"
+            f"📨 Request — sirf join request bhejna kaafi hai"
         )
         await show(target, txt, fsub_kb(pid, x))
     elif st == "refer":
         t, kb = refer_view(p, uid, x)
         await show(target, t, kb)
     elif st == "delivered":
-        await show(target, f"🎉 <b>{esc(p['name'])}</b> unlock ho gaya! Content bhej diya gaya 👇")
+        await show(target, f"🎉 <b>Congratulations!</b>\n{LINE}\n<b>{esc(p['name'])}</b> unlock ho gaya ⚡\nContent neeche bheja gaya 👇")
     else:
-        await show(target, f"✅ <b>{esc(p['name'])}</b> aap pehle hi le chuke ho (ek baar hi milta hai).")
+        await show(target, f"✅ <b>{esc(p['name'])}</b> aap pehle hi le chuke ho.\n<i>Ye product ek baar hi milta hai.</i>")
     return st
 
 
@@ -273,7 +289,7 @@ async def leaderboard_text(pid):
     for i, r in enumerate(rows):
         medal = MEDALS[i] if i < 3 else f"{i + 1}."
         lines.append(f"{medal} {esc(names.get(r['_id'], 'User'))[:20]} — <b>{r['c']}</b>")
-    return f"🏆 <b>{esc(p['name'])}</b> — Top Referrers\n\n" + "\n".join(lines)
+    return f"🏆 <b>{esc(p['name'])}</b> — Top Referrers\n{LINE}\n" + "\n".join(lines)
 
 
 # ---------------- delete timer loop ----------------

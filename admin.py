@@ -6,17 +6,30 @@ from datetime import timedelta
 from pyrogram import filters
 from pyrogram.enums import ChatMemberStatus
 from pyrogram.errors import FloodWait, InputUserDeactivated, PeerIdInvalid, UserIsBlocked
-from pyrogram.types import InlineKeyboardButton as B
-from pyrogram.types import InlineKeyboardMarkup as KB
+
+from ui import B, KB
 
 import config
 from client import app
-from core import esc, leaderboard_text, log_ch, plink, show
+from core import LINE, esc, leaderboard_text, log_ch, plink, show
 from db import (drop_cache, get_settings, jobs, next_pid, now, products, refers,
-                set_setting, users)
+                meta, set_setting, users)
 
 log = logging.getLogger("admin")
-A = filters.user(config.ADMINS)
+ADMIN_IDS = set(config.ADMINS)   # owners (env) + admins added from the bot
+
+
+async def _is_admin(_, __, u):
+    return bool(getattr(u, "from_user", None) and u.from_user.id in ADMIN_IDS)
+
+
+A = filters.create(_is_admin)
+
+
+async def load_admins():
+    d = await meta.find_one({"_id": "admins"}) or {}
+    ADMIN_IDS.update(d.get("ids", []))
+
 ST = {}      # admin wizard states
 RUN = {}     # running broadcasts
 TASKS = set()
@@ -33,6 +46,9 @@ PANEL = KB([
     [B("📦 Products", callback_data="apl:0"), B("📢 Broadcast", callback_data="bc")],
     [B("📊 Stats", callback_data="ast"), B("⚙️ Settings", callback_data="aset")],
 ])
+
+
+PANEL_TXT = f"🛠 <b>Admin Panel</b>\n{LINE}\nSab kuch yahin se manage karo 👇"
 
 
 async def del_storage(ids):
@@ -68,7 +84,7 @@ async def build_fsub(chat, mode):
 @app.on_message(filters.command("admin") & filters.private & A)
 async def admin_cmd(c, m):
     ST.pop(m.from_user.id, None)
-    await m.reply_text("🛠 <b>Admin Panel</b>", reply_markup=PANEL)
+    await m.reply_text(PANEL_TXT, reply_markup=PANEL)
 
 
 @cb(r"^(adm|cancel)$")
@@ -76,7 +92,7 @@ async def adm_cb(c, q):
     s = ST.pop(q.from_user.id, None)
     if s and s.get("items"):
         await del_storage([cid for _, cid in s["items"]])
-    await show(q, "🛠 <b>Admin Panel</b>", PANEL)
+    await show(q, PANEL_TXT, PANEL)
     await q.answer()
 
 
@@ -112,7 +128,7 @@ async def card(pid):
     timer = "Global" if mins is None else ("Off" if mins == 0 else f"{mins} min")
     text = (
         f"📦 <b>#{pid} {esc(p['name'])}</b>"
-        f"{'  ⏸ <i>paused</i>' if p.get('paused') else ''}\n\n"
+        f"{'  ⏸ <i>paused</i>' if p.get('paused') else ''}\n{LINE}\n"
         f"🎯 Refer target: <b>{p['refers_required']}</b>\n"
         f"📁 Content: <b>{len(p['msg_ids'])}</b> items\n"
         f"📢 FSub:\n{fs}\n"
@@ -368,17 +384,18 @@ async def stats(c, q):
     dl = await users.count_documents({"has_delivered": True})
     pc = await products.count_documents({})
     rc = await refers.count_documents({"status": "counted"})
-    await show(q, (f"📊 <b>Stats</b>\n\n👥 Users: <b>{total}</b> (active {act})\n📦 Products: <b>{pc}</b>\n"
+    await show(q, (f"📊 <b>Stats</b>\n{LINE}\n👥 Users: <b>{total}</b> (active {act})\n📦 Products: <b>{pc}</b>\n"
                    f"🎁 Delivered users: <b>{dl}</b>\n✅ Counted refers: <b>{rc}</b>"), HOME)
     await q.answer()
 
 
 async def settings_view():
     s = await get_settings()
-    t = (f"⚙️ <b>Settings</b>\n\n⏳ Global delete timer: <b>{str(s['delete_min']) + ' min' if s['delete_min'] else 'Off'}</b>\n"
+    t = (f"⚙️ <b>Settings</b>\n{LINE}\n⏳ Global delete timer: <b>{str(s['delete_min']) + ' min' if s['delete_min'] else 'Off'}</b>\n"
          f"🔁 Refer expiry (channel leave par count kam): <b>{'ON' if s['refer_expiry'] else 'OFF'}</b>")
     kb = KB([[B("⏳ Set Timer", callback_data="aset_t")],
              [B(f"🔁 Refer expiry: {'ON' if s['refer_expiry'] else 'OFF'}", callback_data="aset_e")],
+             [B("👋 Welcome message", callback_data="aset_w"), B("👮 Admins", callback_data="aadm")],
              [B("🏠 Home", callback_data="adm")]])
     return t, kb
 
@@ -402,6 +419,52 @@ async def aset_e(c, q):
     s = await get_settings()
     await set_setting("refer_expiry", not s["refer_expiry"])
     t, k = await settings_view()
+    await show(q, t, k)
+    await q.answer()
+
+
+async def admins_view():
+    d = await meta.find_one({"_id": "admins"}) or {}
+    extra = d.get("ids", [])
+    lines = [f"👑 <code>{i}</code> (owner)" for i in config.ADMINS] + [f"👮 <code>{i}</code>" for i in extra]
+    rows = [[B(f"❌ Remove {i}", callback_data=f"aadm_rm:{i}")] for i in extra]
+    rows += [[B("➕ Add Admin", callback_data="aadm_add")], [B("⬅️ Back", callback_data="aset")]]
+    return f"👮 <b>Admins</b>\n{LINE}\n" + "\n".join(lines) + "\n\n<i>Sirf owners add/remove kar sakte hain.</i>", KB(rows)
+
+
+@cb(r"^aset_w$")
+async def aset_w(c, q):
+    ST[q.from_user.id] = {"act": "set_welcome"}
+    await show(q, "👋 Naya <b>welcome message</b> bhejo (formatting chalegi).\n"
+                  "<code>{name}</code> = user ka naam\n<code>reset</code> = default wapas", CANCEL)
+    await q.answer()
+
+
+@cb(r"^aadm$")
+async def aadm(c, q):
+    t, k = await admins_view()
+    await show(q, t, k)
+    await q.answer()
+
+
+@cb(r"^aadm_add$")
+async def aadm_add(c, q):
+    if q.from_user.id not in config.ADMINS:
+        return await q.answer("Sirf owner ye kar sakta hai.", show_alert=True)
+    ST[q.from_user.id] = {"act": "add_admin"}
+    await show(q, "👮 Naye admin ka <b>user ID</b> bhejo:", CANCEL)
+    await q.answer()
+
+
+@cb(r"^aadm_rm:(\d+)$")
+async def aadm_rm(c, q):
+    if q.from_user.id not in config.ADMINS:
+        return await q.answer("Sirf owner ye kar sakta hai.", show_alert=True)
+    i = int(q.matches[0].group(1))
+    await meta.update_one({"_id": "admins"}, {"$pull": {"ids": i}})
+    if i not in config.ADMINS:
+        ADMIN_IDS.discard(i)
+    t, k = await admins_view()
     await show(q, t, k)
     await q.answer()
 
@@ -670,6 +733,25 @@ async def state_h(c, m):
         await set_setting("delete_min", int(txt))
         ST.pop(uid, None)
         t, k = await settings_view()
+        return await m.reply_text(t, reply_markup=k)
+
+    if act == "set_welcome":
+        if not txt:
+            return await m.reply_text("❌ Text bhejo.")
+        val = None if txt.lower() == "reset" else getattr(m.text, "html", txt)
+        await set_setting("welcome", val)
+        ST.pop(uid, None)
+        t, k = await settings_view()
+        return await m.reply_text(t, reply_markup=k)
+
+    if act == "add_admin":
+        if uid not in config.ADMINS or not txt.isdigit():
+            return await m.reply_text("❌ Valid numeric user ID bhejo.")
+        i = int(txt)
+        await meta.update_one({"_id": "admins"}, {"$addToSet": {"ids": i}}, upsert=True)
+        ADMIN_IDS.add(i)
+        ST.pop(uid, None)
+        t, k = await admins_view()
         return await m.reply_text(t, reply_markup=k)
 
     if act == "bc_msg":

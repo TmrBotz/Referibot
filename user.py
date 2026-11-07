@@ -3,12 +3,12 @@ import time
 from pymongo.errors import DuplicateKeyError
 from pyrogram import filters
 from pyrogram.enums import ChatMemberStatus
-from pyrogram.types import InlineKeyboardButton as B
-from pyrogram.types import InlineKeyboardMarkup as KB
+
+from ui import B, KB
 
 import core
 from client import app
-from core import bar, esc, flow, leaderboard_text, show
+from core import DEFAULT_WELCOME, bar, esc, flow, leaderboard_text, show
 from db import get_product, get_settings, jr, now, products, refers, users
 
 _last = {}
@@ -75,10 +75,14 @@ async def start(c, m):
         p = await get_product(int(k[1:]))
         if p:
             rows.append([B(f"🎁 {p['name'][:30]}", callback_data=f"ref:{p['_id']}")])
-    text = "👋 <b>Welcome!</b>\n\nFree product paane ke liye kisi product ka link kholo."
-    if rows:
-        text += "\n\n<b>Aapke products:</b>"
-    await m.reply_text(text, reply_markup=KB(rows) if rows else None)
+    name = esc(m.from_user.first_name)
+    welcome = (await get_settings()).get("welcome") or DEFAULT_WELCOME
+    extra = "\n\n📂 <b>Aapke products</b>" if rows else ""
+    kb = KB(rows) if rows else None
+    try:
+        await m.reply_text(welcome.replace("{name}", name) + extra, reply_markup=kb)
+    except Exception:
+        await m.reply_text(DEFAULT_WELCOME.replace("{name}", name) + extra, reply_markup=kb)
 
 
 @app.on_callback_query(filters.regex(r"^(chk|ref):(\d+)$"))
@@ -89,7 +93,7 @@ async def flow_cb(c, q):
     uid = q.from_user.id
     await touch_user(q.from_user)
     await register(uid, pid, None)
-    st = await flow(q, uid, pid)
+    st = await flow(q, uid, pid, fast=(kind == "ref"))
     if st == "fsub" and kind == "chk":
         await q.answer("❌ Abhi bhi kuch channels join nahi kiye.", show_alert=True)
     else:

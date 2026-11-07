@@ -45,7 +45,8 @@ async def get_settings():
     if _cfg["v"] and time.monotonic() - _cfg["t"] < 10:
         return _cfg["v"]
     d = await meta.find_one({"_id": "settings"}) or {}
-    _cfg["v"] = {"delete_min": d.get("delete_min", 10), "refer_expiry": d.get("refer_expiry", False)}
+    _cfg["v"] = {"delete_min": d.get("delete_min", 10), "refer_expiry": d.get("refer_expiry", False),
+                 "welcome": d.get("welcome")}
     _cfg["t"] = time.monotonic()
     return _cfg["v"]
 

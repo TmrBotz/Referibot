@@ -8,6 +8,7 @@ import admin  # noqa: F401  (registers handlers)
 import config
 import core
 import db
+import ui
 import user  # noqa: F401  (registers handlers)
 from client import app
 
@@ -21,6 +22,8 @@ async def health(_):
 
 async def main():
     await db.init_indexes()
+    await admin.load_admins()
+    log.info("Button colors: %s", "ON" if ui.COLORS else "OFF (library me style support nahi)")
 
     # dummy web server (Render/Koyeb/Railway health check)
     web_app = web.Application()
