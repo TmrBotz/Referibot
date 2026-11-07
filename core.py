@@ -173,7 +173,7 @@ async def try_deliver(uid, pid, fsub_ok=False, announce=False):
         return False
     if await count_refs(pid, uid) < p["refers_required"]:
         return False
-    if not fsub_ok and not rec.get("fsub_done") and await missing_fsubs(uid, p):
+    if not fsub_ok and await missing_fsubs(uid, p):
         return False
 
     # atomic claim -> only one delivery ever
@@ -234,7 +234,7 @@ async def on_fsub_done(uid, pid):
 
 async def advance(uid, pid, fast=False):
     """Returns (state, product, extra). state: off | fsub | delivered | already | refer
-    fast=True: skip the fsub API check for users who already passed it (used by Refresh)."""
+    (`fast` is unused now: fsub is always re-checked.)"""
     p = await get_product(pid)
     if not p or p.get("paused"):
         return "off", p, None
@@ -242,12 +242,11 @@ async def advance(uid, pid, fast=False):
     rec = ((u or {}).get("products") or {}).get(f"p{pid}") or {}
     if rec.get("delivered"):
         return "already", p, None
-    skip = fast and rec.get("fsub_done")
-    if not skip:
-        miss = await missing_fsubs(uid, p)
-        if miss:
-            return "fsub", p, miss
-        await on_fsub_done(uid, pid)
+    # fsub is re-checked on every request (even if the user passed it earlier)
+    miss = await missing_fsubs(uid, p)
+    if miss:
+        return "fsub", p, miss
+    await on_fsub_done(uid, pid)
     if await try_deliver(uid, pid, fsub_ok=True):
         return "delivered", p, None
     return "refer", p, await count_refs(pid, uid)
