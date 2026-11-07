@@ -396,6 +396,7 @@ async def settings_view():
     kb = KB([[B("⏳ Set Timer", callback_data="aset_t")],
              [B(f"🔁 Refer expiry: {'ON' if s['refer_expiry'] else 'OFF'}", callback_data="aset_e")],
              [B("👋 Welcome message", callback_data="aset_w"), B("👮 Admins", callback_data="aadm")],
+             [B("🩺 Diagnose", callback_data="adiag")],
              [B("🏠 Home", callback_data="adm")]])
     return t, kb
 
@@ -421,6 +422,37 @@ async def aset_e(c, q):
     t, k = await settings_view()
     await show(q, t, k)
     await q.answer()
+
+
+async def _chk(label, chat_id):
+    try:
+        ch = await app.get_chat(chat_id)
+        me = await app.get_chat_member(chat_id, "me")
+        ok = me.status in (ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.OWNER)
+        return f"{'✅' if ok else '⚠️'} {label}: {esc(ch.title)}" + ("" if ok else " — bot admin nahi hai")
+    except Exception as e:
+        return f"❌ {label}: <code>{esc(e)}</code>"
+
+
+@cb(r"^adiag$")
+async def adiag(c, q):
+    await q.answer("Checking...")
+    lines = [await _chk("Storage", config.STORAGE_CHANNEL)]
+    seen = set()
+    async for p in products.find({}, {"name": 1, "fsubs": 1, "msg_ids": 1}):
+        for f in p["fsubs"]:
+            if f["chat_id"] not in seen:
+                seen.add(f["chat_id"])
+                lines.append(await _chk(f"FSub #{p['_id']}", f["chat_id"]))
+        try:
+            msgs = await app.get_messages(config.STORAGE_CHANNEL, p["msg_ids"][:100])
+            msgs = msgs if isinstance(msgs, list) else [msgs]
+            good = sum(1 for m in msgs if m and not m.empty)
+            lines.append(f"{'✅' if good == len(p['msg_ids']) else '❌'} Content #{p['_id']}: {good}/{len(p['msg_ids'])} messages mil rahe hain")
+        except Exception as e:
+            lines.append(f"❌ Content #{p['_id']}: <code>{esc(e)}</code>")
+    await show(q, f"🩺 <b>Diagnose</b>\n{LINE}\n" + "\n".join(lines),
+               KB([[B("🔄 Dobara check", callback_data="adiag")], [B("⬅️ Back", callback_data="aset")]]))
 
 
 async def admins_view():

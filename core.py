@@ -1,6 +1,7 @@
 import asyncio
 import html
 import logging
+import time
 from datetime import timedelta
 from urllib.parse import quote
 
@@ -64,8 +65,25 @@ async def log_ch(text):
             pass
 
 
+_alerted = {}
+
+
+async def alert(text, key=None):
+    """Error alert to LOG_CHANNEL (or owners' DM). Same alert is sent at most once per 5 min."""
+    k = key or text[:80]
+    if time.monotonic() - _alerted.get(k, 0) < 300:
+        return
+    _alerted[k] = time.monotonic()
+    for tid in ([config.LOG_CHANNEL] if config.LOG_CHANNEL else config.ADMINS):
+        try:
+            await app.send_message(tid, text)
+        except Exception:
+            pass
+
+
 # ---------------- fsub ----------------
-async def is_joined(uid, f):
+async def is_joined(uid, f, _retry=True):
+    err = None
     try:
         m = await app.get_chat_member(f["chat_id"], uid)
         st = m.status
@@ -79,13 +97,24 @@ async def is_joined(uid, f):
         pass
     except FloodWait as e:
         await asyncio.sleep(e.value + 1)
-        return await is_joined(uid, f)
+        return await is_joined(uid, f, _retry)
     except Exception as e:
-        # bot admin issue etc. -> don't block users
-        log.warning("fsub check failed %s: %s", f["chat_id"], e)
+        err = e
+    if f["mode"] == "request" and await jr.find_one({"user_id": uid, "chat_id": f["chat_id"]}):
         return True
-    if f["mode"] == "request":
-        return bool(await jr.find_one({"user_id": uid, "chat_id": f["chat_id"]}))
+    if err is not None:
+        if _retry:
+            try:
+                await app.get_chat(f["chat_id"])  # refresh peer cache, then retry once
+            except Exception:
+                pass
+            return await is_joined(uid, f, False)
+        log.warning("fsub check failed %s: %s", f["chat_id"], err)
+        await alert(
+            f"⚠️ <b>FSub check fail</b>\nChannel: <b>{esc(f['title'])}</b> (<code>{f['chat_id']}</code>)\n"
+            f"<code>{esc(err)}</code>\n\nBot ko is channel me admin banao (Invite Users permission ke saath).",
+            key=f"fs{f['chat_id']}",
+        )
     return False
 
 
@@ -104,18 +133,22 @@ async def count_refs(pid, uid):
 
 async def send_content(uid, p):
     sent = []
-    ids = p["msg_ids"]
-    for i in range(0, len(ids), 100):
-        chunk = ids[i:i + 100]
+    for mid in p["msg_ids"]:
         while True:
             try:
-                res = await app.copy_messages(
-                    uid, config.STORAGE_CHANNEL, chunk, protect_content=bool(p.get("protect"))
+                m = await app.copy_message(
+                    uid, config.STORAGE_CHANNEL, mid, protect_content=bool(p.get("protect"))
                 )
+                sent.append(m.id)
                 break
             except FloodWait as e:
                 await asyncio.sleep(e.value + 1)
-        sent += [m.id for m in (res if isinstance(res, list) else [res])]
+            except Exception as e:
+                if not sent:
+                    raise
+                log.warning("copy failed mid=%s: %s", mid, e)
+                break
+        await asyncio.sleep(0.05)
 
     mins = p.get("delete_min")
     if mins is None:
@@ -158,7 +191,15 @@ async def try_deliver(uid, pid, fsub_ok=False, announce=False):
     except Exception as e:
         log.error("delivery failed uid=%s pid=%s: %s", uid, pid, e)
         await users.update_one({"_id": uid}, {"$set": {f"products.p{pid}.delivered": False}})
-        await log_ch(f"❌ Delivery failed\nuser: <code>{uid}</code>\nproduct: {pid}\n<code>{esc(e)}</code>")
+        await alert(
+            f"❌ <b>Delivery failed</b>\nUser: <code>{uid}</code> | Product: {pid}\n<code>{esc(e)}</code>\n\n"
+            f"Check: STORAGE_CHANNEL me bot admin hai? Content messages delete to nahi hue? (Admin → Settings → 🩺 Diagnose)",
+            key=f"dl{pid}",
+        )
+        try:
+            await app.send_message(uid, "⚠️ Content bhejne me dikkat aayi. Admin ko bata diya gaya hai, thodi der baad 🔄 Refresh dabao.")
+        except Exception:
+            pass
         return False
 
 
